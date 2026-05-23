@@ -79,13 +79,15 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin gh-pages 2>/dev/null || true
+          # Fetch gh-pages if it exists on remote
+          git fetch origin gh-pages:gh-pages 2>/dev/null || true
 
-          if git ls-remote --exit-code origin gh-pages 2>/dev/null; then
+          if git show-ref --verify --quiet refs/heads/gh-pages; then
+            # Branch exists locally (fetched above) — check it out
             git checkout gh-pages
-            git pull origin gh-pages --rebase
           else
-            echo "gh-pages branch not found — creating orphan branch"
+            # First-ever run — create clean orphan branch
+            echo "Creating gh-pages branch for the first time"
             git checkout --orphan gh-pages
             git rm -rf . 2>/dev/null || true
           fi
