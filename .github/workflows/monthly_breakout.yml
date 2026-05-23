@@ -1,13 +1,11 @@
 name: NSE Monthly Breakout Screener
 
-# ── Triggers ───────────────────────────────────────────────────────────────────
 on:
   schedule:
-    # 1st of every month at 10:30 UTC  =  4:00 PM IST (after NSE close)
+    # 1st of every month at 10:30 UTC = 4:00 PM IST (after NSE close)
     - cron: "30 10 1 * *"
-  workflow_dispatch:          # allow manual run from Actions tab
+  workflow_dispatch:
 
-# ── Permissions (needed for GitHub Pages push) ────────────────────────────────
 permissions:
   contents: write
 
@@ -17,72 +15,109 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ── 1. Checkout ───────────────────────────────────────────────────────────
+      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python setup ───────────────────────────────────────────────────────
+      # ── 2. Python ─────────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      # ── 3. Install dependencies ───────────────────────────────────────────────
+      # ── 3. Dependencies ───────────────────────────────────────────────────
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── 4. Compute GitHub Pages download URL ──────────────────────────────────
-      - name: Set Pages URL env var
+      # ── 4. Build Pages URL ────────────────────────────────────────────────
+      - name: Set GitHub Pages URL
         run: |
-          REPO="${{ github.repository }}"
-          OWNER="${REPO%%/*}"
-          REPONAME="${REPO##*/}"
+          OWNER="${{ github.repository_owner }}"
+          REPONAME="${{ github.event.repository.name }}"
           echo "PAGES_URL=https://${OWNER}.github.io/${REPONAME}/Monthly_Breakout_Report.xlsx" >> $GITHUB_ENV
 
-      # ── 5. Run screener ───────────────────────────────────────────────────────
-      - name: Run Monthly Breakout Screener
+      # ── 5. Run screener (NO telegram yet) ─────────────────────────────────
+      - name: Run screener
+        run: python send_telegram_alert.py
+        env:
+          SEND_TELEGRAM: "false"
+
+      # ── 6. Upload Excel as workflow artifact ──────────────────────────────
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Monthly_Breakout_Report_${{ github.run_number }}
+          path: output/Monthly_Breakout_Report.xlsx
+          retention-days: 90
+
+      # ── 7. Deploy to GitHub Pages ─────────────────────────────────────────
+      - name: Deploy to GitHub Pages
+        run: |
+          # Copy report out before branch switch
+          cp output/Monthly_Breakout_Report.xlsx /tmp/Monthly_Breakout_Report.xlsx
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin gh-pages 2>/dev/null || true
+
+          # Switch to gh-pages (create orphan branch if first time)
+          if git ls-remote --exit-code origin gh-pages; then
+            git checkout gh-pages
+            git pull origin gh-pages --rebase
+          else
+            git checkout --orphan gh-pages
+            git rm -rf . 2>/dev/null || true
+          fi
+
+          # Restore report
+          cp /tmp/Monthly_Breakout_Report.xlsx ./Monthly_Breakout_Report.xlsx
+
+          # Create / update index.html
+          cat > index.html << 'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>NSE Monthly Breakout Report</title>
+            <style>
+              body { font-family: Arial, sans-serif; max-width: 600px;
+                     margin: 60px auto; padding: 0 20px; color: #1F3864; }
+              h2   { border-bottom: 2px solid #1F3864; padding-bottom: 8px; }
+              a.btn{ display: inline-block; background: #1F3864; color: #fff;
+                     padding: 12px 24px; border-radius: 6px; text-decoration: none;
+                     font-size: 15px; margin-top: 16px; }
+              a.btn:hover { background: #375623; }
+              p.note { color: #555; font-size: 13px; margin-top: 24px; }
+            </style>
+          </head>
+          <body>
+            <h2>📊 NSE Monthly Breakout Screener</h2>
+            <p>Latest report generated on the 1st of each month.</p>
+            <a class="btn" href="Monthly_Breakout_Report.xlsx">
+              ⬇ Download Report (Excel)
+            </a>
+            <p class="note">Universe: NSE 500 &nbsp;|&nbsp; Source: Yahoo Finance</p>
+          </body>
+          </html>
+          HTML
+
+          git add Monthly_Breakout_Report.xlsx index.html
+          git commit -m "Monthly Breakout Report — $(date +'%b %Y')" || echo "Nothing new to commit"
+          git push origin gh-pages
+
+      # ── 8. Wait for Pages CDN to propagate ───────────────────────────────
+      - name: Wait for GitHub Pages to go live
+        run: |
+          echo "Waiting 90 seconds for Pages CDN to propagate..."
+          sleep 90
+
+      # ── 9. Send Telegram alert AFTER Pages is live ────────────────────────
+      - name: Send Telegram alert
+        run: python send_telegram_alert.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           PAGES_URL:          ${{ env.PAGES_URL }}
-        run: python nse_monthly_breakout.py
-
-      # ── 6. Upload Excel as workflow artifact (30-day retention) ───────────────
-      - name: Upload report artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Monthly_Breakout_Report
-          path: output/Monthly_Breakout_Report.xlsx
-          retention-days: 30
-
-      # ── 7. Publish to GitHub Pages (gh-pages branch) ─────────────────────────
-      - name: Deploy report to GitHub Pages
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Fetch or create gh-pages branch
-          git fetch origin gh-pages 2>/dev/null || true
-          git checkout gh-pages 2>/dev/null || git checkout --orphan gh-pages
-
-          # Copy the report to root of gh-pages
-          cp output/Monthly_Breakout_Report.xlsx ./Monthly_Breakout_Report.xlsx
-
-          # Minimal index if this is the first deploy
-          if [ ! -f index.html ]; then
-            cat > index.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head><meta charset="utf-8"><title>NSE Monthly Breakout Report</title></head>
-          <body style="font-family:Arial;padding:40px">
-            <h2>NSE Monthly Breakout Screener</h2>
-            <p><a href="Monthly_Breakout_Report.xlsx">⬇️ Download Latest Report (Excel)</a></p>
-          </body>
-          </html>
-          EOF
-          fi
-
-          git add Monthly_Breakout_Report.xlsx index.html
-          git commit -m "Monthly Breakout Report — $(date +'%b %Y')" || echo "Nothing to commit"
-          git push origin gh-pages
