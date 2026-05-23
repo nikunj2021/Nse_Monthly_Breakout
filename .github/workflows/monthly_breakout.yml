@@ -2,8 +2,7 @@ name: NSE Monthly Breakout Screener
 
 on:
   schedule:
-    # 1st of every month at 10:30 UTC = 4:00 PM IST (after NSE close)
-    - cron: "30 10 1 * *"
+    - cron: "30 10 1 * *"   # 1st of every month, 4:00 PM IST
   workflow_dispatch:
 
 permissions:
@@ -15,35 +14,56 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python ─────────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      # ── 3. Dependencies ───────────────────────────────────────────────────
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── 4. Build Pages URL ────────────────────────────────────────────────
+      # ── Pre-flight: confirm CSV is present ──────────────────────────────────
+      - name: Check input CSV exists
+        run: |
+          if [ ! -f "data/nse500list.csv" ]; then
+            echo "❌ ERROR: data/nse500list.csv not found in repository!"
+            echo "Please commit your stock list CSV to the data/ folder."
+            exit 1
+          fi
+          echo "✅ Found data/nse500list.csv"
+          echo "   Rows: $(wc -l < data/nse500list.csv)"
+          echo "   Header: $(head -1 data/nse500list.csv)"
+
       - name: Set GitHub Pages URL
         run: |
           OWNER="${{ github.repository_owner }}"
           REPONAME="${{ github.event.repository.name }}"
           echo "PAGES_URL=https://${OWNER}.github.io/${REPONAME}/Monthly_Breakout_Report.xlsx" >> $GITHUB_ENV
 
-      # ── 5. Run screener (NO telegram yet) ─────────────────────────────────
+      # ── Run screener ────────────────────────────────────────────────────────
       - name: Run screener
-        run: python send_telegram_alert.py
+        run: |
+          python nse_monthly_breakout.py
+          echo "EXIT_CODE=$?" >> $GITHUB_ENV
         env:
           SEND_TELEGRAM: "false"
 
-      # ── 6. Upload Excel as workflow artifact ──────────────────────────────
+      # ── Verify output was actually created ──────────────────────────────────
+      - name: Verify output file
+        run: |
+          if [ ! -f "output/Monthly_Breakout_Report.xlsx" ]; then
+            echo "❌ ERROR: Script ran but output file was not created."
+            echo "Check the logs above for Python errors."
+            exit 1
+          fi
+          SIZE=$(du -h output/Monthly_Breakout_Report.xlsx | cut -f1)
+          echo "✅ Report created — size: $SIZE"
+          ls -lh output/
+
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
@@ -51,10 +71,9 @@ jobs:
           path: output/Monthly_Breakout_Report.xlsx
           retention-days: 90
 
-      # ── 7. Deploy to GitHub Pages ─────────────────────────────────────────
+      # ── Deploy to GitHub Pages ───────────────────────────────────────────────
       - name: Deploy to GitHub Pages
         run: |
-          # Copy report out before branch switch
           cp output/Monthly_Breakout_Report.xlsx /tmp/Monthly_Breakout_Report.xlsx
 
           git config user.name  "github-actions[bot]"
@@ -62,19 +81,17 @@ jobs:
 
           git fetch origin gh-pages 2>/dev/null || true
 
-          # Switch to gh-pages (create orphan branch if first time)
-          if git ls-remote --exit-code origin gh-pages; then
+          if git ls-remote --exit-code origin gh-pages 2>/dev/null; then
             git checkout gh-pages
             git pull origin gh-pages --rebase
           else
+            echo "gh-pages branch not found — creating orphan branch"
             git checkout --orphan gh-pages
             git rm -rf . 2>/dev/null || true
           fi
 
-          # Restore report
           cp /tmp/Monthly_Breakout_Report.xlsx ./Monthly_Breakout_Report.xlsx
 
-          # Create / update index.html
           cat > index.html << 'HTML'
           <!DOCTYPE html>
           <html lang="en">
@@ -96,9 +113,7 @@ jobs:
           <body>
             <h2>📊 NSE Monthly Breakout Screener</h2>
             <p>Latest report generated on the 1st of each month.</p>
-            <a class="btn" href="Monthly_Breakout_Report.xlsx">
-              ⬇ Download Report (Excel)
-            </a>
+            <a class="btn" href="Monthly_Breakout_Report.xlsx">⬇ Download Report (Excel)</a>
             <p class="note">Universe: NSE 500 &nbsp;|&nbsp; Source: Yahoo Finance</p>
           </body>
           </html>
@@ -108,13 +123,11 @@ jobs:
           git commit -m "Monthly Breakout Report — $(date +'%b %Y')" || echo "Nothing new to commit"
           git push origin gh-pages
 
-      # ── 8. Wait for Pages CDN to propagate ───────────────────────────────
-      - name: Wait for GitHub Pages to go live
+      - name: Wait for GitHub Pages CDN
         run: |
-          echo "Waiting 90 seconds for Pages CDN to propagate..."
+          echo "Waiting 90s for Pages to propagate..."
           sleep 90
 
-      # ── 9. Send Telegram alert AFTER Pages is live ────────────────────────
       - name: Send Telegram alert
         run: python send_telegram_alert.py
         env:
