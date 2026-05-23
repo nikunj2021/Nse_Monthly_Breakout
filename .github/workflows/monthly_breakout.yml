@@ -26,17 +26,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── Pre-flight: confirm CSV is present ──────────────────────────────────
       - name: Check input CSV exists
         run: |
           if [ ! -f "data/nse500list.csv" ]; then
-            echo "❌ ERROR: data/nse500list.csv not found in repository!"
-            echo "Please commit your stock list CSV to the data/ folder."
+            echo "ERROR: data/nse500list.csv not found in repository!"
             exit 1
           fi
-          echo "✅ Found data/nse500list.csv"
-          echo "   Rows: $(wc -l < data/nse500list.csv)"
-          echo "   Header: $(head -1 data/nse500list.csv)"
+          echo "Found data/nse500list.csv — rows: $(wc -l < data/nse500list.csv)"
 
       - name: Set GitHub Pages URL
         run: |
@@ -44,25 +40,18 @@ jobs:
           REPONAME="${{ github.event.repository.name }}"
           echo "PAGES_URL=https://${OWNER}.github.io/${REPONAME}/Monthly_Breakout_Report.xlsx" >> $GITHUB_ENV
 
-      # ── Run screener ────────────────────────────────────────────────────────
       - name: Run screener
-        run: |
-          python nse_monthly_breakout.py
-          echo "EXIT_CODE=$?" >> $GITHUB_ENV
+        run: python nse_monthly_breakout.py
         env:
           SEND_TELEGRAM: "false"
 
-      # ── Verify output was actually created ──────────────────────────────────
       - name: Verify output file
         run: |
           if [ ! -f "output/Monthly_Breakout_Report.xlsx" ]; then
-            echo "❌ ERROR: Script ran but output file was not created."
-            echo "Check the logs above for Python errors."
+            echo "ERROR: output file not created — check Python logs above"
             exit 1
           fi
-          SIZE=$(du -h output/Monthly_Breakout_Report.xlsx | cut -f1)
-          echo "✅ Report created — size: $SIZE"
-          ls -lh output/
+          echo "Report created — size: $(du -h output/Monthly_Breakout_Report.xlsx | cut -f1)"
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
@@ -71,7 +60,6 @@ jobs:
           path: output/Monthly_Breakout_Report.xlsx
           retention-days: 90
 
-      # ── Deploy to GitHub Pages ───────────────────────────────────────────────
       - name: Deploy to GitHub Pages
         run: |
           cp output/Monthly_Breakout_Report.xlsx /tmp/Monthly_Breakout_Report.xlsx
@@ -79,14 +67,11 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Fetch gh-pages if it exists on remote
           git fetch origin gh-pages:gh-pages 2>/dev/null || true
 
           if git show-ref --verify --quiet refs/heads/gh-pages; then
-            # Branch exists locally (fetched above) — check it out
             git checkout gh-pages
           else
-            # First-ever run — create clean orphan branch
             echo "Creating gh-pages branch for the first time"
             git checkout --orphan gh-pages
             git rm -rf . 2>/dev/null || true
@@ -126,13 +111,48 @@ jobs:
           git push origin gh-pages
 
       - name: Wait for GitHub Pages CDN
-        run: |
-          echo "Waiting 90s for Pages to propagate..."
-          sleep 90
+        run: sleep 90
 
       - name: Send Telegram alert
-        run: python send_telegram_alert.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           PAGES_URL:          ${{ env.PAGES_URL }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, os, requests
+
+          token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          url     = os.environ.get("PAGES_URL", "")
+
+          if not token or not chat_id:
+              print("Telegram credentials not set — skipping.")
+              raise SystemExit(0)
+
+          with open("output/summary.json") as f:
+              s = json.load(f)
+
+          top      = s.get("top_tickers", [])
+          top_line = ("  " + "  |  ".join(top)) if top else "  —"
+          dl_line  = f'\n📥 <a href="{url}">Download Report (Excel)</a>' if url else ""
+
+          msg = (
+              f"📊 <b>NSE Monthly Breakout — {s['run_month']}</b>\n"
+              f"━━━━━━━━━━━━━━━━━━━━\n"
+              f"✅ Breakout stocks  : <b>{s['breakout_count']}</b>\n"
+              f"🔥 Full breakout    : <b>{s['full_breakout']}</b>  "
+              f"(Close &amp; Low both above prev month)\n"
+              f"\n<b>Top Full-Breakout Tickers:</b>\n{top_line}"
+              f"{dl_line}\n"
+              f"━━━━━━━━━━━━━━━━━━━━\n"
+              f"<i>Universe: NSE 500  |  Source: Yahoo Finance</i>"
+          )
+
+          r = requests.post(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
+              timeout=10,
+          )
+          print("Telegram sent ✓" if r.ok else f"Telegram failed: {r.status_code} {r.text}")
+          PYEOF
